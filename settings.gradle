@@ -1,11 +1,13 @@
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        maven { url 'https://api.xposed.info/' }
         google()
         mavenCentral()
-        jcenter() // Warning: this repository is going to shut down soon
-
         maven { url "https://jitpack.io" } //PhotoView
+        maven { url 'https://maven.aliyun.com/repository/public/' }
+        maven { url 'https://repo1.maven.org/maven2/' }
+        maven { url 'https://repo.spring.io/libs-milestone/' }
     }
 }
 rootProject.name = "TXHook"

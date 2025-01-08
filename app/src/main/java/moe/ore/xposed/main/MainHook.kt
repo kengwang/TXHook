@@ -6,6 +6,7 @@ package moe.ore.xposed.main
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -46,10 +47,8 @@ import moe.ore.xposed.helper.entries.SavedToken
 import moe.ore.xposed.util.*
 import java.io.File
 import java.lang.ref.WeakReference
-import java.lang.reflect.Field
-import kotlin.collections.filter
-import kotlin.collections.first
 import kotlin.collections.set
+import kotlin.math.pow
 
 object MainHook {
     private val defaultUri = Uri.parse("content://${CatchProvider.MY_URI}")
@@ -59,9 +58,9 @@ object MainHook {
     /**
      * 缓存一些用完释放的东西
      */
-    private val GlobalCache: HashMap<Int, Any> = hashMapOf()
     private val CodecWarpper = load("com.tencent.qphone.base.util.CodecWarpper")!!
     private val cryptor = load("oicq.wlogin_sdk.tools.cryptor")!!
+
     // private val fromService = load("com.tencent.qphone.base.remote.FromServiceMsg")!!
     private val EcdhCrypt = load("oicq.wlogin_sdk.tools.EcdhCrypt")
     private val Ticket = load("oicq.wlogin_sdk.request.Ticket")
@@ -73,9 +72,6 @@ object MainHook {
     private val TcpProtocolDataCodec =
         load("com.tencent.mobileqq.highway.codec.TcpProtocolDataCodec")
     // private val httpCodecClz = load("com.tencent.mobileqq.highway.codec.HttpProtocolDataCodec")
-
-    private var GlobalData: Class<*>? = null
-    private val globalDataFields: HashMap<Int, String> = hashMapOf()
 
     // private const val fuck = false
 
@@ -100,32 +96,21 @@ object MainHook {
         } else {
             if (!isInit)
                 checkPermissions(ctx)
-            CodecWarpper.hookMethod("init")?.before {
-                // context isDebug useSubCodec
-                // Toast.toast(ctx, "[${ProcessUtil.getCurrentProcessName(ctx)}] TXHOOK初始化($source)")
-                if (it.args.size >= 2) {
-                    it.args[1] = true // 强制打开调试模式
-                    // if (it.args.size >= 3) it.args[2] = true // test version
-                    if (!isInit) {
-                        val thisClass = it.thisObject.javaClass
-                        // hookReceivePacket(thisClass, bytesClz, fromService)
-                        hookReceive(thisClass)
-                    }
+            hookReceive()
+            hookLog()
+
+            // 【废弃】构建ws长连接作为数据交互
+            // ProtocolDatas.setAppId(codecClazz.callMethod("getAppid") as Int)
+            // ProtocolDatas.setMaxPackageSize(codecClazz.callMethod("getMaxPackageSize") as Int)
+            if (!isInit) {
+                val url = ConfigPusher[KEY_WS_ADDRESS]
+                if (!url.isNullOrBlank()) {
+                    Toast.toast(ctx, "尝试连接WebSocket")
+                    HookUtil.tryToConnectWS(url, source)
                 }
-                hookLog()
-            }?.after {
-                // 【废弃】构建ws长连接作为数据交互
-                // ProtocolDatas.setAppId(codecClazz.callMethod("getAppid") as Int)
-                // ProtocolDatas.setMaxPackageSize(codecClazz.callMethod("getMaxPackageSize") as Int)
-                if (!isInit) {
-                    val url = ConfigPusher[KEY_WS_ADDRESS]
-                    if (!url.isNullOrBlank()) {
-                        Toast.toast(ctx, "尝试连接WebSocket")
-                        HookUtil.tryToConnectWS(url, source)
-                    }
-                    isInit = true
-                }
+                isInit = true
             }
+
             hookQQSafe(ctx)
             hookMD5()
             hookTlv()
@@ -208,9 +193,6 @@ object MainHook {
 
     private fun hookQQSafe(ctx: Context) {
         // 干掉qqanti
-        GlobalData = FuzzySearchClass.findClassByField("oicq.wlogin_sdk.request") {
-            it.type == ByteArray::class.java && (it.get(null) as? ByteArray)?.contentHashCode() == 881419086
-        }
 
         kotlin.runCatching {
             ChooseUtils.choose(ClassLoader::class.java).forEach {
@@ -334,7 +316,7 @@ object MainHook {
     }
 
     private fun hookParams() {
-        val dandelionClz = load("com.tencent.dandelionsdk.Dandelion")
+        val dandelionClz = load("com.tencent.mobileqq.qsec.qsecdandelionsdk.Dandelion")
         dandelionClz.hookMethod("fly")?.after {
             val result = HookUtil.castToBytes(it.result)
             val data = HookUtil.castToBytes(it.args[0])
@@ -616,6 +598,7 @@ object MainHook {
         }
     }
 
+
     // cache 0xff_id
     private fun hookEcdh(
         oicq_request: Class<*>,
@@ -635,85 +618,32 @@ object MainHook {
                 it.result = null
             }
         } // 强制使用默认ecdh
-
         if (ConfigPusher[KEY_ECDH_NEW_HOOK] != "no") {
-            if (GlobalData != null) {
-                // lateinit var GlobalDataObject: Any 0xff01
-                // lateinit var possibleFields: Array<Field> 0xff02
-                WtloginHelper.hookMethod("ShareKeyInit")?.before {
-                    GlobalCache[0xff01] = it.thisObject.javaClass.declaredFields
-                        .first { it.type == GlobalData }
-                        .also { if (!it.isAccessible) it.isAccessible = true }
-                        .get(it.thisObject)!!
 
-                    if (!globalDataFields.containsKey(1) || !globalDataFields.containsKey(0)) {
-                        GlobalCache[0xff02] = GlobalData!!.fields.filter {
-                            it.type == ByteArray::class.java
-                                    && (XposedHelpers.getObjectField(
-                                GlobalCache[0xff01],
-                                it.name
-                            ) as? ByteArray).contentHashCode() == 1353309697
-                        }.toTypedArray()
-                    }
-                }?.after {
-                    val GlobalDataObject = GlobalCache[0xff01]
-                    // val dataMap: HashMap<Int, ByteArray> = hashMapOf()
-                    if (!globalDataFields.containsKey(1) || !globalDataFields.containsKey(0)) {
-                        (GlobalCache[0xff02] as Array<Field>).forEach {
-                            (XposedHelpers.getObjectField(
-                                GlobalDataObject,
-                                it.name
-                            ) as? ByteArray).let { data ->
-                                if (data != null && data.contentHashCode() != 1353309697) {
-                                    globalDataFields[if (data.size > 16) 0 else 1] = it.name
-                                    // 0 public 1 share
-                                }
-                            }
-                        }
-                        // GlobalCache.remove(0xff01) 不释放 后面要用的
-                        GlobalCache.remove(0xff02) // 释放引用
-                    }
-                    ((XposedHelpers.getObjectField(
-                        GlobalDataObject,
-                        globalDataFields[0]
-                    ) as? ByteArray)!! to
-                            (XposedHelpers.getObjectField(
-                                GlobalDataObject,
-                                globalDataFields[1]
-                            ) as? ByteArray)!!).let {
-                        if (it.first.contentHashCode() != 1353309697) {
-                            val hexPub = it.first.toHexString()
-                            val hexShr = it.second.toHexString()
-                            DataPutter.put(DataKind.ECDH_SHARE, hexShr)
-                            DataPutter.put(DataKind.ECDH_PUBLIC, hexPub)
-                        }
-                    }
-                    ConfigPusher.getData(KEY_DATA_PUBLIC).let {
-                        if (it != null) ProtoBuf.decodeFromByteArray(it) else SavedToken()
-                    }.let {
-                        val token = it[source]
-                        if (token.isLock) {
-                            //Toast.toast(ctx, "检测到ECDH被发生变化")
-                            XposedHelpers.setObjectField(
-                                GlobalDataObject,
-                                globalDataFields[0],
-                                token.token
-                            )
-                        }
-                    }
+            WtloginHelper.hookMethod("ShareKeyInit")
 
-                    ConfigPusher.getData(KEY_DATA_SHARE).let {
-                        if (it != null) ProtoBuf.decodeFromByteArray(it) else SavedToken()
-                    }.let {
-                        val token = it[source]
-                        if (token.isLock) {
-                            XposedHelpers.setObjectField(
-                                GlobalDataObject,
-                                globalDataFields[1],
-                                token.token
-                            )
-                            //Toast.toast(ctx, "强制固定ECDH成功")
-                        }
+            EcdhCrypt.hookMethod("get_c_pub_key")?.after {
+                DataPutter.put(DataKind.ECDH_PUBLIC, (it.result as ByteArray).toHexString())
+                ConfigPusher.getData(KEY_DATA_PUBLIC).let { data ->
+                    if (data != null) ProtoBuf.decodeFromByteArray(data) else SavedToken()
+                }.let { dt ->
+                    val token = dt[source]
+                    if (token.isLock) {
+                        //Toast.toast(ctx, "检测到ECDH被发生变化")
+                        it.result = token.token
+                    }
+                }
+            }
+
+            EcdhCrypt.hookMethod("get_g_share_key")?.after {
+                DataPutter.put(DataKind.ECDH_SHARE, (it.result as ByteArray).toHexString())
+                ConfigPusher.getData(KEY_DATA_SHARE).let { data ->
+                    if (data != null) ProtoBuf.decodeFromByteArray(data) else SavedToken()
+                }.let { dt ->
+                    val token = dt[source]
+                    if (token.isLock) {
+                        //Toast.toast(ctx, "检测到ECDH被发生变化")
+                        it.result = token.token
                     }
                 }
             }
@@ -932,109 +862,62 @@ object MainHook {
     }
 
     private fun hookSendPacket() {
-        CodecWarpper.hookMethod("encodeRequest")?.after { param ->
-            val args = param.args
-            when (args.size) {
-                17 -> {
-                    val seq = args[0] as Int
-                    val cmd = args[5] as String
-                    // -- qimei [15] imei [2] version [4]
-
-                    if (!isIgnore(cmd)) {
-                        val msgCookie = args[6] as? ByteArray
-                        val uin = args[9] as String
-                        val buffer = args[15] as ByteArray
-                        val util = ContentValues()
-
-                        util.put("uin", uin)
-                        util.put("seq", seq)
-
-                        util.put("cmd", cmd)
-                        util.put("type", "unknown")
-                        util.put("msgCookie", msgCookie ?: EMPTY_BYTE_ARRAY)
-                        util.put("buffer", buffer)
-
-                        util.put("mode", "send")
-
-                        HookUtil.sendTo(defaultUri, util, source)
-                    }
-                }
-                14 -> {
-                    val seq = args[0] as Int
-                    val cmd = args[5] as String
-                    if (!isIgnore(cmd)) {
-                        val msgCookie = args[6] as? ByteArray
-                        val uin = args[9] as String
-                        val buffer = args[12] as ByteArray
-
-                        val util = ContentValues()
-                        util.put("uin", uin)
-                        util.put("seq", seq)
-                        util.put("cmd", cmd)
-                        util.put("type", "unknown")
-                        util.put("msgCookie", msgCookie ?: EMPTY_BYTE_ARRAY)
-                        util.put("buffer", buffer)
-
-                        util.put("mode", "send")
-
-                        HookUtil.sendTo(defaultUri, util, source)
-                    }
-                }
-                16 -> {
-                    val seq = args[0] as Int
-                    val cmd = args[5] as String
-                    if (!isIgnore(cmd)) {
-                        val msgCookie = args[6] as? ByteArray
-                        val uin = args[9] as String
-                        val buffer = args[14] as ByteArray
-                        // -- qimei [15] imei [2] version [4]
-
-                        val util = ContentValues()
-                        util.put("uin", uin)
-                        util.put("seq", seq)
-                        util.put("cmd", cmd)
-                        util.put("type", "unknown")
-                        util.put("msgCookie", msgCookie ?: EMPTY_BYTE_ARRAY)
-                        util.put("buffer", buffer)
-
-                        util.put("mode", "send")
-
-                        HookUtil.sendTo(defaultUri, util, source)
-                    }
-                }
-                else -> {
-                    log("hook到了个不知道什么东西")
-                }
-            }
-        }
-    }
-
-    private fun hookReceive(
-        clazz: Class<*>
-    ) {
-        clazz.hookMethod("onResponse")?.after { param ->
-            val from = param.args[1]
+        val clazz = load("mqq.app.MSFServlet")
+        clazz.hookMethod("sendToMSF")?.after {
+            val from = it.args[1]
             val seq = HookUtil.invokeFromObjectMethod(from, "getRequestSsoSeq") as Int
             val cmd = HookUtil.invokeFromObjectMethod(from, "getServiceCmd") as String
             if (!isIgnore(cmd)) {
-                val msgCookie = HookUtil.invokeFromObjectMethod(from, "getMsgCookie") as? ByteArray
                 val uin = HookUtil.invokeFromObjectMethod(from, "getUin") as String
                 val buffer = HookUtil.invokeFromObjectMethod(from, "getWupBuffer") as ByteArray
-                // -- qimei [15] imei [2] version [4]
-
                 val util = ContentValues()
                 util.put("uin", uin)
                 util.put("seq", seq)
                 util.put("cmd", cmd)
                 util.put("type", "unknown")
-                util.put("msgCookie", msgCookie ?: EMPTY_BYTE_ARRAY)
+                util.put("msgCookie", EMPTY_BYTE_ARRAY)
                 util.put("buffer", buffer)
 
-                util.put("mode", "receive")
+                util.put("mode", "send")
 
                 HookUtil.sendTo(defaultUri, util, source)
             }
         }
+    }
+
+    private fun hookReceive() {
+        val clazz = load("mqq.app.MSFServlet")
+        val method = clazz?.declaredMethods?.first {
+            it.name == "onReceive" && it.parameterTypes.size == 1
+        }
+        XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam?) {
+                val from = param?.args?.last() ?: return
+                val seq = HookUtil.invokeFromObjectMethod(from, "getRequestSsoSeq") as Int
+                val cmd = HookUtil.invokeFromObjectMethod(from, "getServiceCmd") as String
+                if (!isIgnore(cmd)) {
+                    val msgCookie =
+                        HookUtil.invokeFromObjectMethod(from, "getMsgCookie") as? ByteArray
+                    val uin = HookUtil.invokeFromObjectMethod(from, "getUin") as String
+                    val buffer = HookUtil.invokeFromObjectMethod(from, "getWupBuffer") as ByteArray
+                    // -- qimei [15] imei [2] version [4]
+
+                    val util = ContentValues()
+                    util.put("uin", uin)
+                    util.put("seq", seq)
+                    util.put("cmd", cmd)
+                    util.put("type", "unknown")
+                    util.put("msgCookie", msgCookie ?: EMPTY_BYTE_ARRAY)
+                    util.put("buffer", buffer)
+
+                    util.put("mode", "receive")
+
+                    HookUtil.sendTo(defaultUri, util, source)
+                }
+                super.afterHookedMethod(param)
+            }
+        })
+
     }
 }
 

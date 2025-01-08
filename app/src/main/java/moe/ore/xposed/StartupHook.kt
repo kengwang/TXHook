@@ -14,6 +14,11 @@ import moe.ore.xposed.main.MainHook
 import moe.ore.xposed.util.afterHook
 import moe.ore.xposed.util.hookMethod
 import java.io.File
+import java.lang.reflect.Field
+import java.lang.reflect.Modifier
+import java.util.HashMap
+
+
 
 object StartupHook {
     private const val TX_FULL_TAG = "tx_full_tag"
@@ -96,7 +101,7 @@ object StartupHook {
                     }.onFailure { log(it) }
                 }
 
-                val loadDex = classLoader!!.loadClass("com.tencent.mobileqq.startup.step.LoadDex")
+                val loadDex = findLoadDexTaskClass(classLoader!!)
                 loadDex.declaredMethods
                     .filter { it.returnType.equals(java.lang.Boolean.TYPE) && it.parameterTypes.isEmpty() }
                     .forEach {
@@ -114,6 +119,52 @@ object StartupHook {
                 deleteDirIfNecessaryNoThrow(it.args[0] as Context)
             }
         }
+    }
+
+    // Code from QAuxiliary
+    @kotlin.Throws(java.lang.ClassNotFoundException::class)
+    private fun findLoadDexTaskClass(cl: java.lang.ClassLoader): java.lang.Class<*> {
+        try {
+            return cl.loadClass("com.tencent.mobileqq.startup.step.LoadDex")
+        } catch (ignored: java.lang.ClassNotFoundException) {
+            // ignore
+        }
+        // for NT QQ
+        // TODO: 2023-04-19 'com.tencent.mobileqq.startup.task.config.a' is not a good way to find the class
+        var kTaskFactory: java.lang.Class<*> = cl.loadClass("com.tencent.mobileqq.startup.task.config.a")
+        val kITaskFactory: java.lang.Class<*> = cl.loadClass("com.tencent.qqnt.startup.task.d")
+        // check cast so that we can sure that we have found the right class
+        if (!kITaskFactory.isAssignableFrom(kTaskFactory)) {
+            kTaskFactory = cl.loadClass("com.tencent.mobileqq.startup.task.config.b")
+            if (!kITaskFactory.isAssignableFrom(kTaskFactory)) {
+                throw java.lang.AssertionError(kITaskFactory.toString() + " is not assignable from " + kTaskFactory)
+            }
+        }
+        var taskClassMapField: Field? = null
+        for (field: Field in kTaskFactory.getDeclaredFields()) {
+            if (field.getType() === java.util.HashMap::class.java && Modifier.isStatic(field.getModifiers())) {
+                taskClassMapField = field
+                break
+            }
+        }
+        if (taskClassMapField == null) {
+            throw java.lang.AssertionError("taskClassMapField not found")
+        }
+        taskClassMapField.setAccessible(true)
+        val taskClassMap: java.util.HashMap<String, java.lang.Class<*>>
+        try {
+            // XXX: this will cause <clinit>() to be called, check whether it will cause any problem
+            taskClassMap = taskClassMapField.get(null) as java.util.HashMap<String, java.lang.Class<*>>
+        } catch (e: java.lang.IllegalAccessException) {
+            // should not happen
+            throw java.lang.AssertionError(e)
+        }
+        checkNotNull(taskClassMap)
+        val loadDexTaskClass: java.lang.Class<*>? = taskClassMap.get("LoadDexTask")
+        if (loadDexTaskClass == null) {
+            throw java.lang.AssertionError("loadDexTaskClass not found")
+        }
+        return loadDexTaskClass
     }
 
     private fun execStartupInit(source: Int, ctx: Context) {
